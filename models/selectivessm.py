@@ -5,6 +5,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 from sklearn.metrics import accuracy_score
 from torch.nn.utils.rnn import pad_sequence
+from collections import Counter
 
 import pdb
 
@@ -171,17 +172,31 @@ def initialize_weights(m):
 
 # Main Script
 if __name__ == "__main__":
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     # Load data
-    train_data = np.load('../split_1/train_physionet2012_1.npy', allow_pickle=True)
-    validation_data = np.load('../split_1/validation_physionet2012_1.npy', allow_pickle=True)
-    test_data = np.load('../split_1/test_physionet2012_1.npy', allow_pickle=True)
+    train_data = np.load('../P12data/split_1/split_1/train_physionet2012_1.npy', allow_pickle=True)
+    validation_data = np.load('../P12data/split_1/split_1/validation_physionet2012_1.npy', allow_pickle=True)
+    test_data = np.load('../P12data/split_1/split_1/test_physionet2012_1.npy', allow_pickle=True)
 
     # Create datasets and dataloaders
     train_dataset = EHRDataset(train_data)
     val_dataset = EHRDataset(validation_data)
     test_dataset = EHRDataset(test_data)
 
-    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, collate_fn=custom_collate_fn)
+    #Class rebalancing
+    class_counts = Counter([item['labels'] for item in train_data])
+    total_samples = sum(class_counts.values())
+    class_weights = [total_samples / count for count in class_counts.values()]
+    class_weights = torch.tensor(class_weights, dtype=torch.float32).to(device)
+
+    #Undersampling minority class
+    sample_weights = [1.0 / class_counts[item['labels']] for item in train_data]
+    sample_weights = torch.tensor(sample_weights, dtype=torch.float32)
+
+    sampler= torch.utils.data.WeightedRandomSampler(sample_weights, len(sample_weights))
+
+
+    train_loader = DataLoader(train_dataset, batch_size=64, sampler=sampler, collate_fn=custom_collate_fn)
     val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False, collate_fn=custom_collate_fn)
     test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False,collate_fn=custom_collate_fn)
 
@@ -193,21 +208,26 @@ if __name__ == "__main__":
     num_classes = 2  # Change according to your labels
 
     # Initialize model, loss, optimizer
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
     model = SelectiveSSM(ts_dim, static_dim, state_dim, hidden_dim, num_classes).to(device)
 
     #Xavier Initialization
     model.apply(initialize_weights)
-    criterion = nn.CrossEntropyLoss()
+
+
+
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
     optimizer = optim.Adam(model.parameters(), lr=1e-6, weight_decay=1e-4)
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)
 
     # Training loop
-    num_epochs = 50
+    num_epochs = 100
     for epoch in range(num_epochs):
         train_loss = train_model(model, train_loader, criterion, optimizer, device)
         print(train_loss)
         val_acc, val_auroc, val_auprc = evaluate_with_metrics(model, val_loader, device)
         print(f"Epoch {epoch + 1}/{num_epochs}, Loss: {train_loss:.4f}, Validation Accuracy: {val_acc:.4f}, Validation AUROC: {val_auroc:.4f}, Validation AUPRC: {val_auprc:.4f}")
+        scheduler.step
 
     # Test evaluation
     test_acc, test_auroc, test_auprc = evaluate_with_metrics(model, test_loader, device)
