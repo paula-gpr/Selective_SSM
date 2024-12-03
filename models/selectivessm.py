@@ -67,6 +67,7 @@ class SelectiveSSM(nn.Module):
         self.classifier = nn.Sequential(
             nn.Linear(state_dim, hidden_dim),
             nn.ReLU(),
+            nn.Dropout(p=0.5),
             nn.Linear(hidden_dim, num_classes)
         )
 
