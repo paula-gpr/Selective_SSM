@@ -1,0 +1,5 @@
+Starting training in epoch: 0
+Epoch 1/100, Loss: 0.8335, Validation Accuracy: 0.1601, Validation AUROC: 0.6144, Validation AUPRC: 0.2386
+
+
+Starting training in epoch: 1

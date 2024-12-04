@@ -8,8 +8,10 @@ from torch.nn.utils.rnn import pad_sequence
 from sklearn.metrics import accuracy_score, roc_auc_score, average_precision_score
 import numpy as np
 from collections import Counter
+from early_stopper import EarlyStopping
 
-myfile=open("results.txt", "w")
+
+torch.cuda.empty_cache()
 
 # Custom PyTorch Dataset
 class EHRDataset(Dataset):
@@ -95,6 +97,7 @@ def train_model(model, train_loader, criterion, optimizer, device):
 def evaluate_with_metrics(model, loader, device):
     model.eval()
     all_preds, all_probs, all_labels = [], [], []
+    total_loss = 0.0
     num_bins = 50  # Número de bins para la cuantización
     with torch.no_grad():
         for ts_values, static_features, labels, lengths in loader:
@@ -111,6 +114,11 @@ def evaluate_with_metrics(model, loader, device):
             outputs = model(input_ids=ts_values_quantized, attention_mask=(ts_values_quantized > 0))
             logits = outputs.logits
             logits = logits[:, -1, :]  # Use the last token's logits for classification
+            
+            if criterion is not None:
+                loss = criterion(logits, labels)
+                total_loss += loss.item()
+            
             probs = torch.softmax(logits, dim=1)[:, 1]
             preds = torch.argmax(logits, dim=1)
 
@@ -120,11 +128,17 @@ def evaluate_with_metrics(model, loader, device):
     acc = accuracy_score(all_labels, all_preds)
     auroc = roc_auc_score(all_labels, all_probs)
     auprc = average_precision_score(all_labels, all_probs)
-    return acc, auroc, auprc
+    val_loss = total_loss / len(loader) if criterion is not None else None
+
+    return acc, auroc, auprc, val_loss
+
+# EarlyStopping Configuration
+early_stopping = EarlyStopping(patience=10, verbose=True, path="best_model.pt")
 
 
 # Main Script
 if __name__ == "__main__":
+    torch.cuda.empty_cache()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Load data
@@ -169,16 +183,26 @@ if __name__ == "__main__":
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
 
     # Training loop
-    num_epochs = 1
+    num_epochs = 50
     for epoch in range(num_epochs):
+        torch.cuda.empty_cache()
         print("Starting training in epoch:", epoch)
         train_loss = train_model(model, train_loader, criterion, optimizer, device)
-        val_acc, val_auroc, val_auprc = evaluate_with_metrics(model, val_loader, device)
-        myfile.write(f"Epoch {epoch + 1}/{num_epochs}, Loss: {train_loss:.4f}, Validation Accuracy: {val_acc:.4f}, Validation AUROC: {val_auroc:.4f}, Validation AUPRC: {val_auprc:.4f}")
-        myfile.write("\n")
+        val_acc, val_auroc, val_auprc, val_loss = evaluate_with_metrics(model, val_loader, device)
+        print(f"Epoch {epoch + 1}/{num_epochs}, Loss: {train_loss:.4f}, Validation Accuracy: {val_acc:.4f}, Validation AUROC: {val_auroc:.4f}, Validation AUPRC: {val_auprc:.4f}")
+
+        # Monitoreo de la pérdida de validación
+        early_stopping(val_loss, model)
+    
+        # Detener si se cumple la condición de early stopping
+        if early_stopping.early_stop:
+            print("Early stopping triggered. Stopping training.")
+            break
+        
         scheduler.step()
 
+    #Load best model
+    model.load_state_dict(torch.load("best_model.pt"))
     # Test evaluation
     test_acc, test_auroc, test_auprc = evaluate_with_metrics(model, test_loader, device)
-    myfile.write(f"Test Accuracy: {test_acc:.4f}, Test AUROC: {test_auroc:.4f}, Test AUPRC: {test_auprc:.4f}")
-    myfile.write("\n")
+    print(f"Test Accuracy: {test_acc:.4f}, Test AUROC: {test_auroc:.4f}, Test AUPRC: {test_auprc:.4f}")
