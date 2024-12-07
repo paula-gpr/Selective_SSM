@@ -13,7 +13,7 @@ from early_stopper import EarlyStopping
 
 torch.cuda.empty_cache()
 
-# Custom PyTorch Dataset
+#Structure the dataset as tensors
 class EHRDataset(Dataset):
     def __init__(self, data):
         self.data = data
@@ -29,7 +29,8 @@ class EHRDataset(Dataset):
         return ts_values, static, label
 
 
-# Custom collate_fn
+# Custom collate_fn for DataLoader
+# It does batch preparation, padding of time-series data, since not all the data has the same length
 def custom_collate_fn(batch):
     ts_values = [item[0] for item in batch]
     static_features = torch.stack([item[1] for item in batch])
@@ -41,28 +42,29 @@ def custom_collate_fn(batch):
     return ts_values_padded, static_features, labels, lengths
 
 
-# Cuantización de tensores con ajuste de rango
+# This function acts as a tokenizer, because it discretizes the continuous variables into bins (quantization)
 def quantize_tensor(tensor, num_bins):
-    """Convierte valores continuos en índices discretos después de normalización."""
+   
     min_val, max_val = tensor.min(), tensor.max()
 
-    # Ajustar los valores al rango positivo [0, max_val - min_val]
+    #Adjust so all vals are in the positive range
     tensor_normalized = (tensor - min_val) / (max_val - min_val)
 
-    # Crear bins en el rango [0, 1] y cuantizar
+    #Create the bins (0,1) and discretize
     bins = torch.linspace(0, 1, steps=num_bins + 1, device=tensor.device)
-    quantized = torch.bucketize(tensor_normalized, bins) - 1  # Ajustar índice para empezar en 0
-    quantized = quantized.clamp(0, num_bins - 1)  # Asegurar que los índices estén dentro del rango válido
+    quantized = torch.bucketize(tensor_normalized, bins) - 1 
+    #All the bins need to be in the appropiate range, we got an error if we did not do this.
+    quantized = quantized.clamp(0, num_bins - 1) 
 
-    # Reducir a 2D seleccionando el índice más significativo
+    #Reduce the dimensionality
     return quantized.argmax(-1)
 
 
-# Training Function
+# Training function, this just trains the model
 def train_model(model, train_loader, criterion, optimizer, device):
     model.train()
     total_loss = 0
-    num_bins = 128  # Número de bins para la cuantización
+    num_bins = 128 
     for ts_values, static_features, labels, lengths in train_loader:
         ts_values, static_features, labels, lengths = (
             ts_values.to(device),
@@ -74,14 +76,14 @@ def train_model(model, train_loader, criterion, optimizer, device):
         # Cuantiza los valores continuos de ts_values
         ts_values_quantized = quantize_tensor(ts_values, num_bins)
 
-        # Validar que los índices están en rango
-        if (ts_values_quantized >= num_bins).any() or (ts_values_quantized < 0).any():
-            raise ValueError("Los valores cuantizados están fuera del rango esperado.")
-
         optimizer.zero_grad()
 
         # Forward pass
-        attention_mask = (ts_values_quantized > 0).float()  # Crear máscara de atención 2D
+
+        #Attention mask for mamba. Telling the model to only focus on non-negative values.
+        #Improvement point -> define the mask with the indicators in the data
+        attention_mask = (ts_values_quantized > 0).float()  
+
         outputs = model(input_ids=ts_values_quantized, attention_mask=attention_mask)
         logits = outputs.logits
         logits = logits[:, -1, :]  # Use the last token's logits for classification
@@ -93,12 +95,12 @@ def train_model(model, train_loader, criterion, optimizer, device):
     return total_loss / len(train_loader)
 
 
-# Evaluation Function
+# Evaluation Function -> same as training function but with some functions for evaluating the performance
 def evaluate_with_metrics(model, loader, device):
     model.eval()
     all_preds, all_probs, all_labels = [], [], []
     total_loss = 0.0
-    num_bins = 50  # Número de bins para la cuantización
+    num_bins = 50 
     with torch.no_grad():
         for ts_values, static_features, labels, lengths in loader:
             ts_values, static_features, labels, lengths = (
@@ -108,12 +110,12 @@ def evaluate_with_metrics(model, loader, device):
                 lengths.to(device),
             )
 
-            # Cuantiza los valores continuos de ts_values
+            
             ts_values_quantized = quantize_tensor(ts_values, num_bins)
 
             outputs = model(input_ids=ts_values_quantized, attention_mask=(ts_values_quantized > 0))
             logits = outputs.logits
-            logits = logits[:, -1, :]  # Use the last token's logits for classification
+            logits = logits[:, -1, :] 
             
             if criterion is not None:
                 loss = criterion(logits, labels)
@@ -128,15 +130,15 @@ def evaluate_with_metrics(model, loader, device):
     acc = accuracy_score(all_labels, all_preds)
     auroc = roc_auc_score(all_labels, all_probs)
     auprc = average_precision_score(all_labels, all_probs)
-    val_loss = total_loss / len(loader) if criterion is not None else None
+    loss = total_loss / len(loader) if criterion is not None else None
 
-    return acc, auroc, auprc, val_loss
+    return acc, auroc, auprc, loss
 
-# EarlyStopping Configuration
+# EarlyStopping Configuration -> using the earlystopping function from the main repo
 early_stopping = EarlyStopping(patience=10, verbose=True, path="best_model.pt")
 
 
-# Main Script
+
 if __name__ == "__main__":
     torch.cuda.empty_cache()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -157,21 +159,23 @@ if __name__ == "__main__":
 
     # Initialize MambaForCausalLM from scratch
     config = MambaConfig(
-        vocab_size=5000,  # Número de bins usados en la cuantización
-        n_positions=512,  # Máxima longitud de secuencia
-        hidden_size=256,  # Dimensión oculta del modelo
-        num_hidden_layers=8,  # Número de capas
-        num_attention_heads=8,  # Número de cabezas de atención
-        intermediate_size=512,  # Tamaño de la capa intermedia
-        hidden_dropout_prob=0.2,  # Dropout en las capas ocultas
+        vocab_size=5000, 
+        n_positions=512, 
+        hidden_size=256, 
+        num_hidden_layers=8, 
+        num_attention_heads=8, 
+        intermediate_size=512,  
+        hidden_dropout_prob=0.2, 
         attention_probs_dropout_prob=0.2,
     )
 
     model = MambaForCausalLM(config=config)
     model.to(device)
-    # Ajusta la última capa para tener 2 salidas
+    
+    #Adding the classification head to the model's layers
     model.lm_head = nn.Linear(config.hidden_size, 2).to(device)
 
+    #Rebalancing the classes to help the model learn
     class_counts = Counter([item['labels'] for item in train_data])
     total_samples = sum(class_counts.values())
     class_weights = [total_samples / count for count in class_counts.values()]
@@ -182,19 +186,19 @@ if __name__ == "__main__":
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
 
-    # Training loop
+    #Training loop
     num_epochs = 50
     for epoch in range(num_epochs):
         torch.cuda.empty_cache()
         print("Starting training in epoch:", epoch)
         train_loss = train_model(model, train_loader, criterion, optimizer, device)
         val_acc, val_auroc, val_auprc, val_loss = evaluate_with_metrics(model, val_loader, device)
-        print(f"Epoch {epoch + 1}/{num_epochs}, Loss: {train_loss:.4f}, Validation Accuracy: {val_acc:.4f}, Validation AUROC: {val_auroc:.4f}, Validation AUPRC: {val_auprc:.4f}")
+        print(f"Epoch {epoch + 1}/{num_epochs}, Loss: {val_loss:.4f}, Validation Accuracy: {val_acc:.4f}, Validation AUROC: {val_auroc:.4f}, Validation AUPRC: {val_auprc:.4f}")
 
-        # Monitoreo de la pérdida de validación
         early_stopping(val_loss, model)
     
-        # Detener si se cumple la condición de early stopping
+        #Stop if early stopping
+        
         if early_stopping.early_stop:
             print("Early stopping triggered. Stopping training.")
             break
@@ -202,7 +206,7 @@ if __name__ == "__main__":
         scheduler.step()
 
     #Load best model
-    model.load_state_dict(torch.load("best_model.pt"))
+    model.load_state_dict(torch.load("best_model_run1.pt"))
     # Test evaluation
-    test_acc, test_auroc, test_auprc = evaluate_with_metrics(model, test_loader, device)
-    print(f"Test Accuracy: {test_acc:.4f}, Test AUROC: {test_auroc:.4f}, Test AUPRC: {test_auprc:.4f}")
+    test_acc, test_auroc, test_auprc, test_loss = evaluate_with_metrics(model, test_loader, device)
+    print(f"Test Accuracy: {test_acc:.4f}, Test AUROC: {test_auroc:.4f}, Test AUPRC: {test_auprc:.4f}, Test loss:  {test_loss:.4f}")
